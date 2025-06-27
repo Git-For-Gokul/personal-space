@@ -38,63 +38,42 @@ spring:
     username: youruser
     password: yourpass
 
+import com.impossibl.postgres.api.jdbc.PGConnection;
+import com.impossibl.postgres.jdbc.PGDataSource;
 
-import org.postgresql.PGConnection;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.CommandLineRunner;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Component;
+import java.sql.Connection;
+import java.sql.Statement;
 
-import javax.annotation.PreDestroy;
-import java.sql.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+public class PgListenApp {
 
-@Component
-public class OutboxListener implements CommandLineRunner {
+    public static void main(String[] args) throws Exception {
 
-    @Autowired
-    private JdbcTemplate jdbcTemplate;
+        PGDataSource dataSource = new PGDataSource();
+        dataSource.setHost("localhost");
+        dataSource.setPort(5432);
+        dataSource.setDatabase("your_db");
+        dataSource.setUser("your_user");
+        dataSource.setPassword("your_password");
 
-    private Connection connection;
-    private ExecutorService executor = Executors.newSingleThreadExecutor();
+        PGConnection connection = (PGConnection) dataSource.getConnection();
 
-    @Override
-    public void run(String... args) throws Exception {
-        connection = jdbcTemplate.getDataSource().getConnection();
-        PGConnection pgConnection = connection.unwrap(PGConnection.class);
-        pgConnection.addNotificationListener((processId, channelName, payload) -> {
-            System.out.println("🔔 New Outbox Message ID: " + payload);
-
-            // Load message from table
-            String json = jdbcTemplate.queryForObject(
-                "SELECT payload FROM kafka_message_outbox WHERE id = ?", new Object[]{Integer.valueOf(payload)}, String.class);
-
-            System.out.println("📦 Payload: " + json);
-
-            // Simulate business logic
-            // e.g., call stored proc or another service
+        // Register listener
+        connection.addNotificationListener((channel, payload) -> {
+            System.out.println("🔔 Received notification from channel: " + channel);
+            System.out.println("📦 Payload: " + payload);
         });
 
+        // Start listening to a channel
         try (Statement stmt = connection.createStatement()) {
-            stmt.execute("LISTEN outbox_channel");
+            stmt.execute("LISTEN my_channel");
         }
 
-        executor.submit(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                PGConnection pgConn = connection.unwrap(PGConnection.class);
-                pgConn.getNotifications(); // triggers listener
-                Thread.sleep(1000); // avoid busy waiting
-            }
-        });
+        System.out.println("✅ Now listening on 'my_channel'...");
 
-        System.out.println("✅ Listening on 'outbox_channel'...");
-    }
-
-    @PreDestroy
-    public void cleanup() throws SQLException {
-        executor.shutdownNow();
-        connection.close();
+        // Keep alive
+        while (true) {
+            Thread.sleep(1000);
+        }
     }
 }
 
