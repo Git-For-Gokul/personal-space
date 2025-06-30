@@ -1,38 +1,47 @@
-import psycopg2
-import select
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
+import com.impossibl.postgres.jdbc.PGConnection;
 
-# Update with your database credentials
-conn = psycopg2.connect(
-    dbname="your_db",
-    user="your_user",
-    password="your_password",
-    host="localhost",   # or your DB host
-    port=5432,
-    sslmode="require"   # Add if using SSL
-)
+import javax.sql.DataSource;
+import java.sql.DriverManager; // Import DriverManager
+import java.sql.SQLException;
 
-# Enable autocommit to receive notifications
-conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+@Configuration
+public class PgJdbcNgDataSourceConfig {
 
-cur = conn.cursor()
-channel = 'counterparty_update'
+    // (Optional) If you still want a pooled DataSource for pgjdbc-ng for other operations, keep these:
+    @Bean
+    @ConfigurationProperties("pgjdbc-ng.datasource")
+    public DataSourceProperties pgJdbcNgDataSourceProperties() {
+        return new DataSourceProperties();
+    }
 
-# Start listening
-cur.execute(f"LISTEN {channel};")
-print(f"👂 Listening for notifications on channel '{channel}'...")
+    @Bean(name = "pgJdbcNgDataSource")
+    public DataSource pgJdbcNgDataSource(@Qualifier("pgJdbcNgDataSourceProperties") DataSourceProperties properties) {
+        return properties.initializeDataSourceBuilder().build();
+    }
 
-try:
-    while True:
-        # Wait for notifications
-        if select.select([conn], [], [], 5) == ([], [], []):
-            print("⏳ Waiting...")
-        else:
-            conn.poll()
-            while conn.notifies:
-                notify = conn.notifies.pop(0)
-                print(f"🔔 Received notification on '{notify.channel}': {notify.payload}")
+    @Bean(name = "pgJdbcNgTemplate")
+    public JdbcTemplate pgJdbcNgTemplate(@Qualifier("pgJdbcNgDataSource") DataSource dataSource) {
+        return new JdbcTemplate(dataSource);
+    }
 
-except KeyboardInterrupt:
-    print("\n🛑 Exiting...")
-    cur.close()
-    conn.close()
+    // --- Dedicated connection for LISTEN ---
+    @Bean(name = "pgJdbcNgListenConnection")
+    public PGConnection pgJdbcNgListenConnection(
+        @Qualifier("pgJdbcNgDataSourceProperties") DataSourceProperties pgJdbcNgDataSourceProperties // Use properties directly
+    ) throws SQLException {
+        // Construct the JDBC URL from the properties
+        String url = pgJdbcNgDataSourceProperties.getUrl();
+        String username = pgJdbcNgDataSourceProperties.getUsername();
+        String password = pgJdbcNgDataSourceProperties.getPassword();
+
+        // Get a direct, non-pooled connection using DriverManager
+        // Make sure the driver is registered (Spring Boot typically handles this)
+        return (PGConnection) DriverManager.getConnection(url, username, password);
+    }
+}
