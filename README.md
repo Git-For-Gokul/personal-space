@@ -97,3 +97,27 @@ IF NOT update_needed THEN
         ...
     END LOOP;
 END IF;
+
+Im designing the kafka message outbox,
+
+CREATE TABLE kafka_message_outbox (
+    id                  BIGSERIAL PRIMARY KEY,
+    topic_name          TEXT NOT NULL,
+    key                 TEXT,
+    message_headers     JSONB,
+    payload             JSONB NOT NULL,
+
+    created_by          TEXT,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    status              TEXT NOT NULL DEFAULT 'PENDING', -- PENDING, SENT, FAILED
+    sent_at             TIMESTAMPTZ,
+    error_message       TEXT,
+    retry_count         INT DEFAULT 0
+);
+
+
+CREATE INDEX idx_outbox_topic_status_created_at 
+ON kafka_message_outbox (topic_name, status, created_at);
+
+
+
