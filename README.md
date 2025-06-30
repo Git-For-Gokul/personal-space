@@ -45,3 +45,4 @@ public class NotificationProcessingService {
         return payload; // Simple passthrough for now
     }
 }
+
