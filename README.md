@@ -1,74 +1,70 @@
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.scheduling.annotation.AsyncResult;
-import org.springframework.stereotype.Service;
+package com.example.repository;
 
-import javax.annotation.PreDestroy;
-import java.util.Map;
-import java.util.concurrent.*;
+import com.example.model.KafkaOutboxEntry;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
 
-@Service
-public class NotificationProcessingService {
+import java.util.List;
 
-    private final Map<String, String> latestNotificationMap = new ConcurrentHashMap<>();
-    private final Map<String, ScheduledFuture<?>> scheduledTasks = new ConcurrentHashMap<>();
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
-    private final long debounceDelaySeconds = 5;
+public interface KafkaOutboxRepository extends JpaRepository<KafkaOutboxEntry, Long> {
 
-    public void scheduleDebouncedProcessing(String payload) {
-        String key = extractKeyFromPayload(payload);
-        latestNotificationMap.put(key, payload);
+    // Find all entries by counterpartyId and status
+    List<KafkaOutboxEntry> findByCounterpartyIdAndStatus(String counterpartyId, String status);
 
-        ScheduledFuture<?> existingTask = scheduledTasks.get(key);
-        if (existingTask != null && !existingTask.isDone()) {
-            existingTask.cancel(false);
-        }
+    // Find all pending entries (used during service startup to resume unprocessed messages)
+    List<KafkaOutboxEntry> findByStatus(String status);
 
-        ScheduledFuture<?> newTask = scheduler.schedule(() -> {
-            String latestPayload = latestNotificationMap.remove(key);
-            scheduledTasks.remove(key);
-            if (latestPayload != null) {
-                processNotificationAsync(latestPayload); // 🔁 Now async
-            }
-        }, debounceDelaySeconds, TimeUnit.SECONDS);
+    // Optional: find latest version by counterparty
+    @Query("SELECT k FROM KafkaOutboxEntry k WHERE k.counterpartyId = :counterpartyId AND k.status = 'pending' ORDER BY k.version DESC")
+    List<KafkaOutboxEntry> findLatestPendingByCounterparty(String counterpartyId);
 
-        scheduledTasks.put(key, newTask);
-    }
+    // Mark older versions as superseded
+    @Modifying
+    @Query("UPDATE KafkaOutboxEntry k SET k.status = 'superseded' WHERE k.counterpartyId = :counterpartyId AND k.status = 'pending' AND k.id <> :readyId")
+    int markOlderAsSuperseded(String counterpartyId, Long readyId);
 
-    @Async("notificationExecutor")
-    public void processNotificationAsync(String payload) {
-        System.out.println("[Debounced] Async Processing on thread [" +
-                Thread.currentThread().getName() + "]: " + payload);
-        // Simulate heavy processing
-        try {
-            Thread.sleep(2000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            System.err.println("Interrupted during async processing of: " + payload);
-        }
-        System.out.println("[Debounced] Finished processing: " + payload);
-    }
+    // Optional: bulk mark entries as ready
+    @Modifying
+    @Query("UPDATE KafkaOutboxEntry k SET k.status = 'ready' WHERE k.id = :id")
+    int markAsReady(Long id);
+}
 
-    private String extractKeyFromPayload(String payload) {
-        // Replace with actual extraction logic
-        return payload; // simple passthrough if payload is the key
-    }
 
-    @PreDestroy
-    public void shutdownExecutor() {
-        System.out.println("Shutting down NotificationProcessingService...");
-        scheduledTasks.values().forEach(future -> future.cancel(false));
-        scheduledTasks.clear();
-        latestNotificationMap.clear();
+@Async
+public void processNotificationAsync(String payload) {
+    String counterpartyId = extractKeyFromPayload(payload);
 
-        scheduler.shutdown();
-        try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
-        System.out.println("Executor shutdown complete.");
-    }
+    List<KafkaOutboxEntry> entries = kafkaOutboxRepository.findByCounterpartyIdAndStatus(counterpartyId, "pending");
+
+    if (entries.isEmpty()) return;
+
+    KafkaOutboxEntry latest = entries.stream()
+        .max(Comparator.comparing(e -> e.getVersion()))
+        .orElseThrow();
+
+    // Mark all others as superseded
+    entries.stream()
+        .filter(e -> !e.getId().equals(latest.getId()))
+        .forEach(e -> {
+            e.setStatus("superseded");
+            kafkaOutboxRepository.save(e);
+        });
+
+    // Round version and update both tables
+    BigDecimal roundedVersion = BigDecimal.valueOf(latest.getVersion().intValue() + 1);
+    latest.setVersion(roundedVersion);
+    latest.setStatus("ready");
+    kafkaOutboxRepository.save(latest);
+
+    counterpartyRepository.updateVersion(counterpartyId, roundedVersion);
+
+    // Send to Kafka
+    kafkaTemplate.send("counterparty-updates", counterpartyId, latest.getPayload().toString());
+
+    // Optionally mark as published
+    latest.setStatus("published");
+    kafkaOutboxRepository.save(latest);
+
+    System.out.println("Published to Kafka: " + counterpartyId + " @ v" + roundedVersion);
 }
