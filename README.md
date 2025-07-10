@@ -4,10 +4,10 @@ DECLARE
     config RECORD;
     update_needed BOOLEAN := FALSE;
     changed_columns TEXT[];
-    changed_json_keys TEXT[];
-    new_val TEXT;
-    old_val TEXT;
+    changed_json_keys_map JSONB := '{}';
     row_code_type TEXT;
+    json_col TEXT;
+    changed_keys TEXT[];
 BEGIN
     IF TG_OP = 'TRUNCATE' THEN
         PERFORM update_counterparty_version(NULL);
@@ -35,68 +35,67 @@ BEGIN
             SELECT skeys(hstore(NEW) - hstore(OLD)) AS skeys
         ) sub;
 
-        -- Pre-detect changed JSON keys if needed
-        IF 'your_json_column_name' = ANY(changed_columns) THEN
-            EXECUTE format(
-                $sql$
-                SELECT array_agg(key)
-                FROM (
-                    SELECT key FROM jsonb_each_text($1.your_json_column_name)
-                    EXCEPT
-                    SELECT key FROM jsonb_each_text($2.your_json_column_name)
-                    UNION
-                    SELECT key FROM jsonb_each_text($2.your_json_column_name)
-                    EXCEPT
-                    SELECT key FROM jsonb_each_text($1.your_json_column_name)
-                ) diff_keys
-                $sql$
-            )
-            INTO changed_json_keys
-            USING NEW, OLD;
-        ELSE
-            changed_json_keys := ARRAY[]::TEXT[];
-        END IF;
+        -- For each distinct JSON column in config, compute changed keys
+        FOR json_col IN
+            SELECT DISTINCT column_name
+            FROM versioning_config
+            WHERE table_name = TG_TABLE_NAME
+              AND json_key IS NOT NULL
+              AND ignore = false
+              AND (code_type IS NULL OR code_type = row_code_type)
+        LOOP
+            IF json_col = ANY(changed_columns) THEN
+                EXECUTE format(
+                    $sql$
+                    SELECT array_agg(key)
+                    FROM (
+                        SELECT key FROM jsonb_each_text($1.%I)
+                        EXCEPT
+                        SELECT key FROM jsonb_each_text($2.%I)
+                        UNION
+                        SELECT key FROM jsonb_each_text($2.%I)
+                        EXCEPT
+                        SELECT key FROM jsonb_each_text($1.%I)
+                    ) diff_keys
+                    $sql$,
+                    json_col, json_col, json_col, json_col
+                )
+                INTO changed_keys
+                USING NEW, OLD;
 
-        -- Main loop
+                IF changed_keys IS NOT NULL THEN
+                    changed_json_keys_map := jsonb_set(
+                        changed_json_keys_map,
+                        ARRAY[json_col],
+                        to_jsonb(changed_keys)
+                    );
+                END IF;
+            END IF;
+        END LOOP;
+
+        -- Now check against config
         FOR config IN
             SELECT * FROM versioning_config
             WHERE table_name = TG_TABLE_NAME
               AND (code_type IS NULL OR code_type = row_code_type)
               AND ignore = false
         LOOP
-            -- Wildcard: any column change triggers version
             IF config.column_name = '*' THEN
                 update_needed := TRUE;
                 EXIT;
 
-            -- Regular column
             ELSIF config.json_key IS NULL AND config.column_name = ANY(changed_columns) THEN
-                EXECUTE format(
-                    'SELECT $1.%I IS DISTINCT FROM $2.%I',
-                    config.column_name, config.column_name
-                )
-                INTO update_needed
-                USING NEW, OLD;
+                update_needed := TRUE;
+                EXIT;
 
-                IF update_needed THEN
-                    EXIT;
-                END IF;
-
-            -- JSON key
-            ELSIF config.json_key IS NOT NULL AND config.column_name = ANY(changed_columns)
-                  AND config.json_key = ANY(changed_json_keys) THEN
-
-                EXECUTE format(
-                    'SELECT ($1.%I ->> %L)', config.column_name, config.json_key
-                ) INTO new_val USING NEW;
-
-                EXECUTE format(
-                    'SELECT ($1.%I ->> %L)', config.column_name, config.json_key
-                ) INTO old_val USING OLD;
-
-                IF new_val IS DISTINCT FROM old_val THEN
-                    update_needed := TRUE;
-                    EXIT;
+            ELSIF config.json_key IS NOT NULL AND config.column_name = ANY(changed_columns) THEN
+                IF changed_json_keys_map ? config.column_name THEN
+                    IF config.json_key = ANY (
+                        (changed_json_keys_map -> config.column_name)::TEXT[]
+                    ) THEN
+                        update_needed := TRUE;
+                        EXIT;
+                    END IF;
                 END IF;
             END IF;
         END LOOP;
