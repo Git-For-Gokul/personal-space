@@ -9,28 +9,29 @@ let
          {"Agreement Version", type text}, 
          {"counterparty id", Int64.Type}}),
 
-    // 2. Create combined column for pivot (e.g., "REPO Agreement Type", "REPO Agreement Version")
-    WithCombinedColumns = Table.TransformColumns(#"Changed Type", {
-        {"Product", each _, type text}
-    }),
-    AddTypeCol = Table.AddColumn(WithCombinedColumns, "PivotKey_Type", each [Product] & " Agreement Type"),
-    AddVersionCol = Table.AddColumn(AddTypeCol, "PivotKey_Version", each [Product] & " Agreement Version"),
+    // 2. Unpivot Agreement Type + Version into rows
+    Unpivoted = Table.Unpivot(#"Changed Type", {"Agreement Type","Agreement Version"}, "Attribute", "Value"),
 
-    // 3. Unpivot into a tall table with the new pivot keys
-    Unpivoted = Table.UnpivotOtherColumns(AddVersionCol, {"counterparty id","Legal Entity","Product"}, "PivotKey", "Value"),
+    // 3. Build new column name like "REPO Agreement Type" or "SLEB Agreement Version"
+    AddedCustom = Table.AddColumn(Unpivoted, "PivotKey", each [Product] & " " & [Attribute]),
 
-    // 4. Pivot so each counterparty+LE becomes one row with all columns
+    // 4. Remove now-redundant columns
+    RemovedExtra = Table.RemoveColumns(AddedCustom, {"Product","Attribute"}),
+
+    // 5. Pivot so each counterparty+LE has its own row with the right set of columns
     Pivoted = Table.Pivot(
-        Unpivoted, 
-        List.Distinct(Unpivoted[PivotKey]), 
-        "PivotKey", 
-        "Value", 
+        RemovedExtra,
+        List.Distinct(RemovedExtra[PivotKey]),
+        "PivotKey",
+        "Value",
         each List.First(_)
     ),
 
-    // 5. Reorder
-    Final = Table.ReorderColumns(Pivoted, {"counterparty id","Legal Entity",
+    // 6. Reorder columns (will only work if they exist — otherwise they’ll just stay at the end)
+    Final = Table.ReorderColumns(Pivoted, {
+        "counterparty id","Legal Entity",
         "REPO Agreement Type","REPO Agreement Version",
-        "SLEB Agreement Type","SLEB Agreement Version"})
+        "SLEB Agreement Type","SLEB Agreement Version"
+    }, MissingField.Ignore)
 in
     Final
