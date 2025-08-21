@@ -1,33 +1,77 @@
 let
-    // 1. Source Data
-    Source = Table.FromRows(Json.Document(Binary.Decompress(Binary.FromText("i45WMjIwMjbQM9QzMDJSitWBCk/MyUxWSslNycjPzQeSMjXgWlUaM7Q1MjUEMsI8hGpkY7CwEChWjIuLz83PysgsBArxIkgGZgbGhsbmhka4dGpqYGYEUMhHqU6K9QyNNYFg7OICkE4OICkGqLg6J+g6J+g6J+i01gOQzQwNAKkjMDSgEisgGQOQzgwMAjVjozRjR1jZgJbZgUqg0YxRzR2AqkdmBqQGAI1T0ZlK9S0MDSGEgLGRsTAzMBkC8k0MDSGEpY5nBkYGAuBfFjpjJ1BwA2UvYHEuIgoZ2BpYGYEUCyL0QxQ9Pdw9B0c6PdwgK6BqQmB2AGtGqQxKDW1gUu9gU242sY+fNzA5F1gJg8M2gPzHwE=", BinaryEncoding.Base64), Compression.GZip)), let _t = ((type nullable text) meta [Serialized.Text = true]) in type table [#"Legal Entity" = _t, Product = _t, #"Agreement Type" = _t, #"Agreement Version" = _t, #"counterparty id" = _t]),
-    #"Changed Type" = Table.TransformColumnTypes(Source,{{"Legal Entity", type text}, {"Product", type text}, {"Agreement Type", type text}, {"Agreement Version", type text}, {"counterparty id", Int64.Type}}),
+    // 1) Load source
+    Source = Excel.CurrentWorkbook(){[Name="Table1"]}[Content],
 
-    // 2. Group by counterparty id to prepare for pivoting
-    Grouped = Table.Group(#"Changed Type", {"counterparty id", "Legal Entity", "Product"}, {
-        {"Agreement Type", each List.First([Agreement Type]), type text},
-        {"Agreement Version", each List.First([Agreement Version]), type text}
-    }),
+    // 2) Ensure types
+    #"Changed Type" = Table.TransformColumnTypes(
+        Source,
+        {
+            {"Legal Entity", type text},
+            {"Product", type text},
+            {"Agreement Type", type text},
+            {"Agreement Version", type text},
+            {"counterparty id", Int64.Type}
+        }
+    ),
 
-    // 3. Pivot the "Agreement Type" column
-    Pivoted_Type = Table.Pivot(Grouped, List.Distinct(Grouped[Product]), "Product", "Agreement Type", Combiner.First),
+    // 3) Normalize Product values (trim + uppercase) to avoid product-name mismatches
+    #"Normalize Product" = Table.TransformColumns(#"Changed Type", {{"Product", each Text.Upper(Text.Trim(_)), type text}}),
 
-    // 4. Pivot the "Agreement Version" column
-    Pivoted_Version = Table.Pivot(Grouped, List.Distinct(Grouped[Product]), "Product", "Agreement Version", Combiner.First),
+    // 4) Group to one row per (counterparty id, Legal Entity, Product)
+    Grouped = Table.Group(
+        #"Normalize Product",
+        {"counterparty id","Legal Entity","Product"},
+        {
+            {"Agreement Type", each List.First([Agreement Type]), type text},
+            {"Agreement Version", each List.First([Agreement Version]), type text}
+        }
+    ),
 
-    // 5. Merge the two pivoted tables based on counterparty and legal entity
-    Merged = Table.NestedJoin(Pivoted_Type, {"counterparty id", "Legal Entity"}, Pivoted_Version, {"counterparty id", "Legal Entity"}, "Version", JoinKind.Inner),
+    // 5) Get product list (e.g. {"REPO","SLEB"})
+    ProductList = List.Distinct(Grouped[Product]),
 
-    // 6. Expand the merged table to add the new columns
-    Expanded = Table.ExpandTableColumn(Merged, "Version", {"REPO", "SLEB"}, {"REPO Version", "SLEB Version"}),
+    // 6) Pivot Agreement Type (creates columns like REPO, SLEB with types)
+    Pivoted_Type = Table.Pivot(
+        Grouped,
+        ProductList,
+        "Product",
+        "Agreement Type",
+        List.First
+    ),
 
-    // 7. Rename the columns for a clean final output
-    #"Renamed Columns" = Table.RenameColumns(Expanded, {
-        {"REPO", "REPO Agreement Type"}, 
-        {"SLEB", "SLEB Agreement Type"}
-    }),
+    // 7) Pivot Agreement Version (creates columns like REPO, SLEB with versions)
+    Pivoted_Version = Table.Pivot(
+        Grouped,
+        ProductList,
+        "Product",
+        "Agreement Version",
+        List.First
+    ),
 
-    // 8. Reorder columns for readability
-    #"Reordered Columns" = Table.ReorderColumns(#"Renamed Columns", {"counterparty id", "Legal Entity", "REPO Agreement Type", "REPO Version", "SLEB Agreement Type", "SLEB Version"})
+    // 8) Rename pivoted columns to descriptive names:
+    //    e.g. REPO -> "REPO Agreement Type", REPO (in version table) -> "REPO Version"
+    RenameTypePairs = List.Transform(ProductList, each {_, _ & " Agreement Type"}),
+    RenameVersionPairs = List.Transform(ProductList, each {_, _ & " Version"}),
+
+    Pivoted_Type_Renamed = Table.RenameColumns(Pivoted_Type, RenameTypePairs, MissingField.Ignore),
+    Pivoted_Version_Renamed = Table.RenameColumns(Pivoted_Version, RenameVersionPairs, MissingField.Ignore),
+
+    // 9) Merge the two pivoted tables on both keys (use FullOuter to keep all rows)
+    Merged = Table.Join(
+        Pivoted_Type_Renamed,
+        {"counterparty id","Legal Entity"},
+        Pivoted_Version_Renamed,
+        {"counterparty id","Legal Entity"},
+        JoinKind.FullOuter
+    ),
+
+    // 10) Reorder columns (only include those that exist)
+    DesiredOrder = {"counterparty id","Legal Entity"} 
+                   & List.Transform(ProductList, each _ & " Agreement Type")
+                   & List.Transform(ProductList, each _ & " Version"),
+
+    FinalOrder = List.Select(DesiredOrder, each List.Contains(Table.ColumnNames(Merged), _)),
+
+    Final = Table.ReorderColumns(Merged, FinalOrder)
 in
-    #"Reordered Columns"
+    Final
