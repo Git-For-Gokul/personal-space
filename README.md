@@ -1,8 +1,8 @@
 let
-    // 1. Load source data
+    // 1. Load data
     Source = Excel.CurrentWorkbook(){[Name="Table1"]}[Content],
 
-    // 2. Ensure column types
+    // 2. Set types
     #"Changed Type" = Table.TransformColumnTypes(
         Source,
         {
@@ -14,62 +14,35 @@ let
         }
     ),
 
-    // 3. Pivot Agreement Type
-    PivotType = Table.Pivot(
+    // 3. Group by counterparty + legal entity + product
+    Grouped = Table.Group(
         #"Changed Type",
-        List.Distinct(#"Changed Type"[Product]),
+        {"counterparty id","Legal Entity","Product"},
+        {
+            {"Agreement Type", each Text.Combine(List.Distinct([Agreement Type]), ", "), type text},
+            {"Agreement Version", each Text.Combine(List.Distinct([Agreement Version]), ", "), type text}
+        }
+    ),
+
+    // 4. Pivot on product (REPO / SLEB)
+    Pivoted = Table.Pivot(
+        Grouped,
+        List.Distinct(Grouped[Product]),
         "Product",
-        "Agreement Type",
-        each List.First(_)
+        {"Agreement Type","Agreement Version"}
     ),
 
-    // 4. Pivot Agreement Version
-    PivotVersion = Table.Pivot(
-        #"Changed Type",
-        List.Distinct(#"Changed Type"[Product]),
-        "Product",
-        "Agreement Version",
-        each List.First(_)
-    ),
-
-    // 5. Merge Type + Version on counterparty id + legal entity
-    Merged = Table.NestedJoin(
-        PivotType,
-        {"counterparty id","Legal Entity"},
-        PivotVersion,
-        {"counterparty id","Legal Entity"},
-        "Ver",
-        JoinKind.FullOuter   // keep all rows, fill missing with null
-    ),
-
-    // 6. Expand version columns
-    Expanded = Table.ExpandTableColumn(
-        Merged,
-        "Ver",
-        {"REPO","SLEB"},
-        {"REPO Version","SLEB Version"}
-    ),
-
-    // 7. Rename type columns
+    // 5. Flatten column names
     Renamed = Table.RenameColumns(
-        Expanded,
+        Pivoted,
         {
-            {"REPO", "REPO Agreement Type"},
-            {"SLEB", "SLEB Agreement Type"}
-        }
-    ),
-
-    // 8. Reorder final columns
-    Final = Table.ReorderColumns(
-        Renamed,
-        {
-            "counterparty id",
-            "Legal Entity",
-            "REPO Agreement Type",
-            "REPO Version",
-            "SLEB Agreement Type",
-            "SLEB Version"
-        }
+            {"REPO.Agreement Type", "REPO Agreement Type"},
+            {"REPO.Agreement Version", "REPO Agreement Version"},
+            {"SLEB.Agreement Type", "SLEB Agreement Type"},
+            {"SLEB.Agreement Version", "SLEB Agreement Version"}
+        },
+        MissingField.Ignore
     )
 in
-    Final
+    Renamed
+
