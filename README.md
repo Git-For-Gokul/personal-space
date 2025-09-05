@@ -1,3 +1,11 @@
+https://registry.npmjs.org/exceljs/-/exceljs-4.4.0.tgz
+
+https://registry.npmjs.org/exceljs/-/exceljs-4.4.0.tgz?utm_source=chatgpt.com
+
+https://www.npmjs.com/package/exceljs?utm_source=chatgpt.com
+
+
+
 const ExcelJS = require("exceljs");
 
 /**
