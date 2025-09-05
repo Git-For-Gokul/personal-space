@@ -1,37 +1,40 @@
-let
-    // 1. Source Data
-    Source = Excel.CurrentWorkbook(){[Name="Table1"]}[Content],
+const XLSX = require("xlsx");
 
-    #"Changed Type" = Table.TransformColumnTypes(Source,
-        {{"Legal Entity", type text}, 
-         {"Product", type text}, 
-         {"Agreement Type", type text}, 
-         {"Agreement Version", type text}, 
-         {"counterparty id", Int64.Type}}),
+/**
+ * Generate an Excel file from query result grouped by report_month
+ * using aoa_to_sheet (explicit headers)
+ * @param {Array} rows - Result rows from client.query()
+ * @param {string} outputFile - Path for output Excel file
+ */
+function generateExcelByMonth(rows, outputFile = "Report.xlsx") {
+  const workbook = XLSX.utils.book_new();
 
-    // 2. Unpivot Agreement Type + Version into rows
-    Unpivoted = Table.Unpivot(#"Changed Type", {"Agreement Type","Agreement Version"}, "Attribute", "Value"),
+  // Group rows by report_month
+  const grouped = rows.reduce((acc, row) => {
+    const month = row.report_month; // assumes column is report_month
+    if (!acc[month]) acc[month] = [];
+    acc[month].push(row);
+    return acc;
+  }, {});
 
-    // 3. Build new column name like "REPO Agreement Type" or "SLEB Agreement Version"
-    AddedCustom = Table.AddColumn(Unpivoted, "PivotKey", each [Product] & " " & [Attribute]),
+  // Get column names (from first row)
+  const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
 
-    // 4. Remove now-redundant columns
-    RemovedExtra = Table.RemoveColumns(AddedCustom, {"Product","Attribute"}),
+  // For each month, add a sheet
+  Object.entries(grouped).forEach(([month, data]) => {
+    // Build AOA (array of arrays): first row = headers
+    const aoa = [
+      headers,
+      ...data.map(row => headers.map(h => row[h]))
+    ];
 
-    // 5. Pivot so each counterparty+LE has its own row with the right set of columns
-    Pivoted = Table.Pivot(
-        RemovedExtra,
-        List.Distinct(RemovedExtra[PivotKey]),
-        "PivotKey",
-        "Value",
-        each List.First(_)
-    ),
+    const worksheet = XLSX.utils.aoa_to_sheet(aoa);
+    XLSX.utils.book_append_sheet(workbook, worksheet, month);
+  });
 
-    // 6. Reorder columns (will only work if they exist — otherwise they’ll just stay at the end)
-    Final = Table.ReorderColumns(Pivoted, {
-        "counterparty id","Legal Entity",
-        "REPO Agreement Type","REPO Agreement Version",
-        "SLEB Agreement Type","SLEB Agreement Version"
-    }, MissingField.Ignore)
-in
-    Final
+  // Write workbook to file
+  XLSX.writeFile(workbook, outputFile);
+  console.log(`Excel file created: ${outputFile}`);
+}
+
+module.exports = { generateExcelByMonth };
