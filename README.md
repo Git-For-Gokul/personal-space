@@ -96,3 +96,10 @@ tar -xvzf unzipper-0.10.14.tgz -C node_modules/unzipper --strip-components=1
 mkdir node_modules\uuid
 tar -xvzf uuid-8.3.2.tgz -C node_modules/uuid --strip-components=1
 
+https://registry.npmjs.org/xmlchars/-/xmlchars-2.2.0.tgz
+mkdir node_modules\xmlchars
+tar -xvzf xmlchars-2.2.0.tgz -C node_modules/xmlchars --strip-components=1
+
+
+
+
