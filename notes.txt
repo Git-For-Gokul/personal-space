@@ -1,0 +1,60 @@
+import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.header.Headers;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+
+public class KafkaIoStyleHeaderExtractor {
+
+    public static Map<String, Object> extractHeaders(Headers headers) {
+        Map<String, Object> result = new LinkedHashMap<>();
+
+        for (Header header : headers) {
+            byte[] value = header.value();
+            if (value == null) {
+                result.put(header.key(), null);
+                continue;
+            }
+
+            Object decoded = tryDecode(value);
+            result.put(header.key(), decoded);
+        }
+        return result;
+    }
+
+    private static Object tryDecode(byte[] value) {
+        try {
+            // UUID (16 bytes)
+            if (value.length == 16) {
+                ByteBuffer bb = ByteBuffer.wrap(value);
+                long high = bb.getLong();
+                long low = bb.getLong();
+                return new UUID(high, low).toString();
+            }
+
+            // Integer (4 bytes)
+            if (value.length == 4) {
+                return ByteBuffer.wrap(value).getInt();
+            }
+
+            // Long (8 bytes)
+            if (value.length == 8) {
+                return ByteBuffer.wrap(value).getLong();
+            }
+
+            // Try UTF-8 string
+            String str = new String(value, StandardCharsets.UTF_8);
+            if (str.chars().allMatch(c -> (c >= 32 && c < 127))) {
+                return str;
+            }
+
+            // Fallback: Base64
+            return Base64.getEncoder().encodeToString(value);
+
+        } catch (Exception e) {
+            // Defensive fallback
+            return Base64.getEncoder().encodeToString(value);
+        }
+    }
+}
